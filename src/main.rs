@@ -6,7 +6,11 @@ extern crate glutin;
 extern crate libc;
 #[macro_use]
 extern crate mozjs;
+extern crate rustyline;
 extern crate tokio_core;
+use mozjs::jsapi::JS_Utf8BufferIsCompilableUnit;
+use rustyline::error::ReadlineError;
+use rustyline::Editor;
 
 use futures::future::{loop_fn, Future, Loop};
 use futures::sync::mpsc;
@@ -85,11 +89,7 @@ macro_rules! gl_set_props {
     };
 }
 
-fn main() {
-    let filename = env::args()
-        .nth(1)
-        .expect("Expected a filename as the first argument");
-
+fn exec_file(filename: String) {
     let mut file = File::open(&filename).expect("File is missing");
     let mut contents = String::new();
     file.read_to_string(&mut contents)
@@ -167,6 +167,137 @@ fn main() {
 
     let _ac = JSAutoRealm::new(cx, global.get());
     context::clear_private(cx);
+}
+
+fn exec_cmd() {
+    let engine = JSEngine::init().unwrap();
+    let rt = Runtime::new(engine.handle());
+    #[cfg(debugmozjs)]
+    unsafe {
+        jsapi::JS_SetGCZeal(rt.rt(), 2, 1)
+    };
+
+    let cx = rt.cx();
+
+    rooted!(in(cx) let global_root =
+        unsafe { JS_NewGlobalObject(cx, &SIMPLE_GLOBAL_CLASS, ptr::null_mut(),
+                           OnNewGlobalHookOption::FireOnNewGlobalHook,
+                           &*RealmOptions::default()) }
+    );
+    let global = global_root.handle();
+    let rcx = RJSContext::new(cx, global.into());
+    let mut line_no = 1u32;
+    // using event loop as loop
+    eventloop::run(&rt, rcx, |handle| {
+        let rcx = handle.get();
+        let _ac = JSAutoRealm::new(cx, global.get());
+
+        context::store_private(cx, &handle);
+
+        let _ = unsafe { JS_EnumerateStandardClasses(cx, global.into()) };
+
+        let wininfo;
+
+        unsafe {
+            let _ = puts.define_on(cx, global.into(), 0);
+            let _ = setTimeout.define_on(cx, global.into(), 0);
+            let _ = getFileSync.define_on(cx, global.into(), 0);
+            let _ = readDir.define_on(cx, global.into(), 0);
+
+            Test::init_class(rcx, global.into());
+            wininfo = Window::init_class(rcx, global.into());
+            WebGLShader::init_class(rcx, global.into());
+            WebGLProgram::init_class(rcx, global.into());
+            WebGLBuffer::init_class(rcx, global.into());
+            WebGLUniformLocation::init_class(rcx, global.into());
+        }
+
+        rooted!(in(rcx.cx) let winproto = wininfo.prototype);
+        let winproto = winproto.handle();
+        rooted!(in(rcx.cx) let mut temp = NullValue());
+        // TODO: Add all constants, organize them in a nice way
+        gl_set_props!([rcx.cx, winproto.into(), temp]
+            FRAGMENT_SHADER VERTEX_SHADER
+            COMPILE_STATUS LINK_STATUS
+            ARRAY_BUFFER
+            STATIC_DRAW
+            COLOR_BUFFER_BIT DEPTH_BUFFER_BIT
+            POINTS TRIANGLES TRIANGLE_STRIP
+            FLOAT
+            DEPTH_TEST
+        );
+
+        let mut brak = false;
+        let mut multiline = false;
+        let start_line = line_no;
+        let mut buffer = String::new();
+        let mut rl = Editor::<()>::new();
+        if rl.load_history("history.txt").is_err() {
+            println!("No previous history.");
+        }
+        loop {
+            let readline = if multiline {
+                rl.readline("> ")
+            } else {
+                rl.readline("js> ")
+            };
+            match readline {
+                Ok(line) => {
+                    rl.add_history_entry(line.as_str());
+                    //println!("Line: {}", line);
+                    buffer.push_str(&line);
+                    line_no += 1;
+                    unsafe {
+                        let script_utf8: Vec<u8> = buffer.bytes().collect();
+                        let script_ptr: *const i8 = buffer.as_ptr() as *const i8; // error
+                        let script_len = script_utf8.len() as usize;
+                        if JS_Utf8BufferIsCompilableUnit(rt.cx(), global.into(), script_ptr, script_len) {
+                            break;
+                        } else {
+                            multiline = true;
+                        }
+                    }
+                }
+                Err(ReadlineError::Interrupted) => {
+                    println!("CTRL-C");
+                    brak = true;
+                    break;
+                }
+                Err(ReadlineError::Eof) => {
+                    println!("CTRL-D");
+                    brak = true;
+                    break;
+                }
+                Err(err) => {
+                    println!("Error: {:?}", err);
+                    break;
+                }
+            }
+        }
+        rooted!(in(cx) let mut rval = UndefinedValue());
+        let res = rt.evaluate_script(global, &buffer, "typein", start_line, rval.handle_mut());
+        if res.is_err() {
+            unsafe {
+                report_pending_exception(cx);
+            }
+        }
+
+        let str = unsafe { String::from_jsval(cx, rval.handle(), ()) }
+            .to_result()
+            .unwrap();
+
+        println!("script result: {}", str);
+    });
+
+    let _ac = JSAutoRealm::new(cx, global.get());
+    context::clear_private(cx);
+}
+
+fn main() {
+    match env::args().nth(1) {
+        Some(filename) => exec_file(filename),
+        None => exec_cmd(),
+    }
 }
 
 trait ToResult<T> {
