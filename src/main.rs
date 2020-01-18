@@ -186,7 +186,6 @@ fn exec_cmd() {
     );
     let global = global_root.handle();
     let rcx = RJSContext::new(cx, global.into());
-    let mut line_no = 1u32;
     // using event loop as loop
     eventloop::run(&rt, rcx, |handle| {
         let rcx = handle.get();
@@ -226,64 +225,77 @@ fn exec_cmd() {
             FLOAT
             DEPTH_TEST
         );
-
-        let mut multiline = false;
-        let start_line = line_no;
-        let mut buffer = String::new();
-        let mut rl = Editor::<()>::new();
-        if rl.load_history("history.txt").is_err() {
-            println!("No previous history.");
-        }
+        let mut line_no = 1u32;
         loop {
-            let readline = if multiline {
-                rl.readline("> ")
-            } else {
-                rl.readline("js> ")
-            };
-            match readline {
-                Ok(line) => {
-                    rl.add_history_entry(line.as_str());
-                    //println!("Line: {}", line);
-                    buffer.push_str(&line);
-                    line_no += 1;
-                    unsafe {
-                        let script_utf8: Vec<u8> = buffer.bytes().collect();
-                        let script_ptr: *const i8 = buffer.as_ptr() as *const i8; // error
-                        let script_len = script_utf8.len() as usize;
-                        if JS_Utf8BufferIsCompilableUnit(rt.cx(), global.into(), script_ptr, script_len) {
-                            break;
-                        } else {
-                            multiline = true;
+            let mut brak = false;
+            let mut multiline = false;
+            let start_line = line_no;
+            let mut buffer = String::new();
+            let mut rl = Editor::<()>::new();
+            if rl.load_history("history.txt").is_err() {
+                println!("No previous history.");
+            }
+            loop {
+                let readline = if multiline {
+                    rl.readline("> ")
+                } else {
+                    rl.readline("js> ")
+                };
+                match readline {
+                    Ok(line) => {
+                        rl.add_history_entry(line.as_str());
+                        //println!("Line: {}", line);
+                        buffer.push_str(&line);
+                        line_no += 1;
+                        unsafe {
+                            let script_utf8: Vec<u8> = buffer.bytes().collect();
+                            let script_ptr: *const i8 = buffer.as_ptr() as *const i8; // error
+                            let script_len = script_utf8.len() as usize;
+                            if JS_Utf8BufferIsCompilableUnit(
+                                rt.cx(),
+                                global.into(),
+                                script_ptr,
+                                script_len,
+                            ) {
+                                break;
+                            } else {
+                                multiline = true;
+                            }
                         }
                     }
-                }
-                Err(ReadlineError::Interrupted) => {
-                    println!("CTRL-C");
-                    break;
-                }
-                Err(ReadlineError::Eof) => {
-                    println!("CTRL-D");
-                    break;
-                }
-                Err(err) => {
-                    println!("Error: {:?}", err);
-                    break;
+                    Err(ReadlineError::Interrupted) => {
+                        println!("CTRL-C");
+                        brak = true;
+                        break;
+                    }
+                    Err(ReadlineError::Eof) => {
+                        println!("CTRL-D");
+                        brak = true;
+                        break;
+                    }
+                    Err(err) => {
+                        println!("Error: {:?}", err);
+                        break;
+                    }
                 }
             }
-        }
-        rooted!(in(cx) let mut rval = UndefinedValue());
-        let res = rt.evaluate_script(global, &buffer, "typein", start_line, rval.handle_mut());
-        if res.is_err() {
-            unsafe {
-                report_pending_exception(cx);
+            if brak {
+                break;
             }
+            rl.save_history("history.txt").unwrap();
+            rooted!(in(cx) let mut rval = UndefinedValue());
+            let res = rt.evaluate_script(global, &buffer, "typein", start_line, rval.handle_mut());
+            if res.is_err() {
+                unsafe {
+                    report_pending_exception(cx);
+                }
+            }
+
+            let str = unsafe { String::from_jsval(cx, rval.handle(), ()) }
+                .to_result()
+                .unwrap();
+            println!("script result: {}", str);
         }
-
-        let str = unsafe { String::from_jsval(cx, rval.handle(), ()) }
-            .to_result()
-            .unwrap();
-
-        println!("script result: {}", str);
     });
 
     let _ac = JSAutoRealm::new(cx, global.get());
