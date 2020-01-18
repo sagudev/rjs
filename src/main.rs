@@ -227,7 +227,6 @@ fn exec_cmd() {
             DEPTH_TEST
         );
 
-        let mut brak = false;
         let mut multiline = false;
         let start_line = line_no;
         let mut buffer = String::new();
@@ -260,12 +259,10 @@ fn exec_cmd() {
                 }
                 Err(ReadlineError::Interrupted) => {
                     println!("CTRL-C");
-                    brak = true;
                     break;
                 }
                 Err(ReadlineError::Eof) => {
                     println!("CTRL-D");
-                    brak = true;
                     break;
                 }
                 Err(err) => {
