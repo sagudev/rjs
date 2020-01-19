@@ -65,11 +65,11 @@ use std::io::Read;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
 use std::sync::Once;
 use std::thread;
 use std::time::{Duration, Instant};
-use std::sync::mpsc::sync_channel;
 use tokio_core::reactor::{Core, Timeout};
 
 macro_rules! setprop {
@@ -254,7 +254,7 @@ fn exec_cmd(
                                 rval.handle_mut(),
                             );
                             if res.is_err() {
-                                    report_pending_exception(cx);
+                                report_pending_exception(cx);
                             }
                             let str = String::from_jsval(cx, rval.handle(), ())
                                 .to_result()
