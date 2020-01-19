@@ -69,6 +69,7 @@ use std::sync::Arc;
 use std::sync::Once;
 use std::thread;
 use std::time::{Duration, Instant};
+use std::sync::mpsc::sync_channel;
 use tokio_core::reactor::{Core, Timeout};
 
 macro_rules! setprop {
@@ -122,6 +123,7 @@ fn exec_file(filename: String) {
         let wininfo;
 
         unsafe {
+            let _ = print.define_on(cx, global.into(), 0);
             let _ = puts.define_on(cx, global.into(), 0);
             let _ = setTimeout.define_on(cx, global.into(), 0);
             let _ = getFileSync.define_on(cx, global.into(), 0);
@@ -169,7 +171,10 @@ fn exec_file(filename: String) {
     context::clear_private(cx);
 }
 
-fn exec_cmd() {
+fn exec_cmd(
+    rx: std::sync::mpsc::Receiver<std::option::Option<(std::string::String, u32)>>,
+    txx: std::sync::mpsc::SyncSender<bool>,
+) {
     let engine = JSEngine::init().unwrap();
     let rt = Runtime::new(engine.handle());
     #[cfg(debugmozjs)]
@@ -198,6 +203,7 @@ fn exec_cmd() {
         let wininfo;
 
         unsafe {
+            let _ = print.define_on(cx, global.into(), 0);
             let _ = puts.define_on(cx, global.into(), 0);
             let _ = setTimeout.define_on(cx, global.into(), 0);
             let _ = getFileSync.define_on(cx, global.into(), 0);
@@ -225,76 +231,47 @@ fn exec_cmd() {
             FLOAT
             DEPTH_TEST
         );
-        let mut line_no = 1u32;
-        loop {
-            let mut brak = false;
-            let mut multiline = false;
-            let start_line = line_no;
-            let mut buffer = String::new();
-            let mut rl = Editor::<()>::new();
-            if rl.load_history("history.txt").is_err() {
-                println!("No previous history.");
-            }
-            loop {
-                let readline = if multiline {
-                    rl.readline("> ")
-                } else {
-                    rl.readline("js> ")
-                };
-                match readline {
-                    Ok(line) => {
-                        rl.add_history_entry(line.as_str());
-                        //println!("Line: {}", line);
-                        buffer.push_str(&line);
-                        line_no += 1;
-                        unsafe {
-                            let script_utf8: Vec<u8> = buffer.bytes().collect();
-                            let script_ptr: *const i8 = buffer.as_ptr() as *const i8; // error
-                            let script_len = script_utf8.len() as usize;
-                            if JS_Utf8BufferIsCompilableUnit(
-                                rt.cx(),
-                                global.into(),
-                                script_ptr,
-                                script_len,
-                            ) {
-                                break;
-                            } else {
-                                multiline = true;
+        for received in rx {
+            match received {
+                Some((buffer, line)) => {
+                    unsafe {
+                        let script_utf8: Vec<u8> = buffer.bytes().collect();
+                        let script_ptr: *const i8 = buffer.as_ptr() as *const i8; // error
+                        let script_len = script_utf8.len() as usize;
+                        if JS_Utf8BufferIsCompilableUnit(
+                            rt.cx(),
+                            global.into(),
+                            script_ptr,
+                            script_len,
+                        ) {
+                            txx.send(true).unwrap();
+                            rooted!(in(cx) let mut rval = UndefinedValue());
+                            let res = rt.evaluate_script(
+                                global,
+                                &buffer,
+                                "typein",
+                                line,
+                                rval.handle_mut(),
+                            );
+                            if res.is_err() {
+                                    report_pending_exception(cx);
                             }
+                            let str = String::from_jsval(cx, rval.handle(), ())
+                                .to_result()
+                                .unwrap();
+                            println!("script result: {}", str);
+                        } else {
+                            txx.send(false).unwrap();
                         }
                     }
-                    Err(ReadlineError::Interrupted) => {
-                        println!("CTRL-C");
-                        brak = true;
-                        break;
-                    }
-                    Err(ReadlineError::Eof) => {
-                        println!("CTRL-D");
-                        brak = true;
-                        break;
-                    }
-                    Err(err) => {
-                        println!("Error: {:?}", err);
-                        break;
-                    }
+                    //txx.send(true).unwrap();
+                    //txx.send(false).unwrap();
+                }
+                None => {
+                    println!("exit");
+                    break;
                 }
             }
-            if brak {
-                break;
-            }
-            rl.save_history("history.txt").unwrap();
-            rooted!(in(cx) let mut rval = UndefinedValue());
-            let res = rt.evaluate_script(global, &buffer, "typein", start_line, rval.handle_mut());
-            if res.is_err() {
-                unsafe {
-                    report_pending_exception(cx);
-                }
-            }
-
-            let str = unsafe { String::from_jsval(cx, rval.handle(), ()) }
-                .to_result()
-                .unwrap();
-            println!("script result: {}", str);
         }
     });
 
@@ -305,7 +282,66 @@ fn exec_cmd() {
 fn main() {
     match env::args().nth(1) {
         Some(filename) => exec_file(filename),
-        None => exec_cmd(),
+        None => {
+            let (tx, rx) = sync_channel::<Option<(String, u32)>>(0);
+            let (txx, rxx) = sync_channel::<bool>(0);
+
+            thread::spawn(move || {
+                exec_cmd(rx, txx);
+            });
+            let mut line_no = 1u32;
+            loop {
+                let mut brak = false;
+                let mut multiline = false;
+                let start_line = line_no;
+                let mut buffer = String::new();
+                let mut rl = Editor::<()>::new();
+                if rl.load_history("history.txt").is_err() {
+                    println!("No previous history.");
+                }
+                loop {
+                    let readline = if multiline {
+                        rl.readline("> ")
+                    } else {
+                        rl.readline("js> ")
+                    };
+                    match readline {
+                        Ok(line) => {
+                            rl.add_history_entry(line.as_str());
+                            //println!("Line: {}", line);
+                            buffer.push_str(&line);
+                            line_no += 1;
+                            tx.send(Some((buffer.clone(), start_line))).unwrap();
+                            if rxx.recv().unwrap() {
+                                break;
+                            } else {
+                                multiline = true;
+                            }
+                        }
+                        Err(ReadlineError::Interrupted) => {
+                            println!("CTRL-C");
+                            brak = true;
+                            break;
+                        }
+                        Err(ReadlineError::Eof) => {
+                            println!("CTRL-D");
+                            brak = true;
+                            break;
+                        }
+                        Err(err) => {
+                            println!("Error: {:?}", err);
+                            break;
+                        }
+                    }
+                }
+                if brak {
+                    tx.send(None).unwrap(); // shutdown
+                    thread::sleep(Duration::from_secs(1));
+                    break;
+                }
+                rl.save_history("history.txt").unwrap();
+            }
+        }
     }
 }
 
@@ -325,6 +361,11 @@ impl<T> ToResult<T> for Result<mozjs::conversions::ConversionResult<T>, ()> {
 
 js_fn! {fn puts(arg: String) -> JSRet<()> {
     println!("puts: {}", arg);
+    Ok(())
+}}
+
+js_fn! {fn print(arg: String) -> JSRet<()> {
+    println!("Rust print: {}", arg);
     Ok(())
 }}
 
