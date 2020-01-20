@@ -171,10 +171,15 @@ fn exec_file(filename: String) {
     context::clear_private(cx);
 }
 
-fn exec_cmd(
-    rx: std::sync::mpsc::Receiver<std::option::Option<(std::string::String, u32)>>,
-    txx: std::sync::mpsc::SyncSender<bool>,
-) {
+pub enum MSG {
+    /// No value
+    Exit,
+    /// Some value `T`
+    Run((std::string::String, u32)),
+    Test(std::string::String),
+}
+
+fn exec_cmd(rx: std::sync::mpsc::Receiver<MSG>, txx: std::sync::mpsc::SyncSender<bool>) {
     let engine = JSEngine::init().unwrap();
     let rt = Runtime::new(engine.handle());
     #[cfg(debugmozjs)]
@@ -233,41 +238,39 @@ fn exec_cmd(
         );
         for received in rx {
             match received {
-                Some((buffer, line)) => {
+                MSG::Run((buffer, line)) => {
                     unsafe {
-                        let script_utf8: Vec<u8> = buffer.bytes().collect();
-                        let script_ptr: *const i8 = buffer.as_ptr() as *const i8; // error
-                        let script_len = script_utf8.len() as usize;
-                        if JS_Utf8BufferIsCompilableUnit(
-                            rt.cx(),
-                            global.into(),
-                            script_ptr,
-                            script_len,
-                        ) {
-                            txx.send(true).unwrap();
-                            rooted!(in(cx) let mut rval = UndefinedValue());
-                            let res = rt.evaluate_script(
-                                global,
-                                &buffer,
-                                "typein",
-                                line,
-                                rval.handle_mut(),
-                            );
-                            if res.is_err() {
-                                report_pending_exception(cx);
-                            }
-                            let str = String::from_jsval(cx, rval.handle(), ())
-                                .to_result()
-                                .unwrap();
-                            println!("script result: {}", str);
-                        } else {
-                            txx.send(false).unwrap();
+                        rooted!(in(cx) let mut rval = UndefinedValue());
+                        let res =
+                            rt.evaluate_script(global, &buffer, "typein", line, rval.handle_mut());
+                        if res.is_err() {
+                            report_pending_exception(cx);
                         }
+                        let str = String::from_jsval(cx, rval.handle(), ())
+                            .to_result()
+                            .unwrap();
+                        println!("script result: {}", str);
                     }
                     //txx.send(true).unwrap();
                     //txx.send(false).unwrap();
                 }
-                None => {
+                MSG::Test(buffer) => {
+                    unsafe {
+                        let script_utf8: Vec<u8> = buffer.bytes().collect();
+                        let script_ptr: *const i8 = buffer.as_ptr() as *const i8; // error
+                        let script_len = script_utf8.len() as usize;
+                        txx.send(JS_Utf8BufferIsCompilableUnit(
+                            rt.cx(),
+                            global.into(),
+                            script_ptr,
+                            script_len,
+                        ))
+                        .unwrap();
+                    }
+                    //txx.send(true).unwrap();
+                    //txx.send(false).unwrap();
+                }
+                MSG::Exit => {
                     println!("exit");
                     break;
                 }
@@ -283,7 +286,7 @@ fn main() {
     match env::args().nth(1) {
         Some(filename) => exec_file(filename),
         None => {
-            let (tx, rx) = sync_channel::<Option<(String, u32)>>(0);
+            let (tx, rx) = sync_channel::<MSG>(0);
             let (txx, rxx) = sync_channel::<bool>(0);
 
             thread::spawn(move || {
@@ -311,7 +314,7 @@ fn main() {
                             //println!("Line: {}", line);
                             buffer.push_str(&line);
                             line_no += 1;
-                            tx.send(Some((buffer.clone(), start_line))).unwrap();
+                            tx.send(MSG::Test(buffer.clone())).unwrap();
                             if rxx.recv().unwrap() {
                                 break;
                             } else {
@@ -335,11 +338,12 @@ fn main() {
                     }
                 }
                 if brak {
-                    tx.send(None).unwrap(); // shutdown
+                    tx.send(MSG::Exit).unwrap(); // shutdown
                     thread::sleep(Duration::from_secs(1));
                     break;
                 }
                 rl.save_history("history.txt").unwrap();
+                tx.send(MSG::Run((buffer, start_line))).unwrap();
             }
         }
     }
