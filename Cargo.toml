@@ -8,7 +8,7 @@ authors = ["Matt Peterson <mattpeterson@google.com>"]
 debugmozjs = ['mozjs/debugmozjs']
 
 [dependencies]
-mozjs = {git = "https://github.com/servo/rust-mozjs"}
+mozjs = { git = "https://github.com/servo/rust-mozjs", rev="eb411fcb3fedffc92cc3be5fb62ba094880f9287"}
 tokio-core = "0.1.17"
 tokio-timer = "0.2.12"
 futures = "0.1.29"

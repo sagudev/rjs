@@ -203,7 +203,7 @@ fn exec_cmd(rx: std::sync::mpsc::Receiver<MSG>, txx: std::sync::mpsc::SyncSender
 
         context::store_private(cx, &handle);
 
-        let _ = unsafe { JS_EnumerateStandardClasses(cx, global.into()) };
+        unsafe{assert!(mozjs::jsapi::InitRealmStandardClasses(cx));}
 
         let wininfo;
 
